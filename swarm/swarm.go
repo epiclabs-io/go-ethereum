@@ -29,6 +29,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ethereum/go-ethereum/swarm/storage/flare"
+
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/contracts/chequebook"
@@ -217,9 +219,14 @@ func NewSwarm(config *api.Config, mockStore *mock.NodeStore) (self *Swarm, err e
 	feedsHandler = feed.NewHandler(fhParams)
 	feedsHandler.SetStore(self.netStore)
 
+	flareHandler := flare.NewHandler(&flare.HandlerParams{
+		ChunkStore: self.netStore,
+	})
+
 	lstore.Validators = []storage.ChunkValidator{
 		storage.NewContentAddressValidator(storage.MakeHashFunc(storage.DefaultHash)),
 		feedsHandler,
+		flareHandler,
 	}
 
 	err = lstore.Migrate()

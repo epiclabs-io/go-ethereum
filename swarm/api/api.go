@@ -46,6 +46,7 @@ import (
 	"github.com/ethereum/go-ethereum/swarm/storage"
 	"github.com/ethereum/go-ethereum/swarm/storage/feed"
 	"github.com/ethereum/go-ethereum/swarm/storage/feed/lookup"
+	"github.com/ethereum/go-ethereum/swarm/storage/flare"
 
 	opentracing "github.com/opentracing/opentracing-go"
 )
@@ -236,17 +237,19 @@ it is the public interface of the FileStore which is included in the ethereum st
 */
 type API struct {
 	feed      *feed.Handler
+	flare     flare.Handler
 	fileStore *storage.FileStore
 	dns       Resolver
 	Decryptor func(context.Context, string) DecryptFunc
 }
 
 // NewAPI the api constructor initialises a new API instance.
-func NewAPI(fileStore *storage.FileStore, dns Resolver, feedHandler *feed.Handler, pk *ecdsa.PrivateKey) (self *API) {
+func NewAPI(fileStore *storage.FileStore, dns Resolver, feedHandler *feed.Handler, flareHandler flare.Handler, pk *ecdsa.PrivateKey) (self *API) {
 	self = &API{
 		fileStore: fileStore,
 		dns:       dns,
 		feed:      feedHandler,
+		flare:     flareHandler,
 		Decryptor: func(ctx context.Context, credentials string) DecryptFunc {
 			return self.doDecrypt(ctx, credentials, pk)
 		},
