@@ -20,7 +20,9 @@ so they can be found
 */
 package lookup
 
-import "context"
+import (
+	"context"
+)
 
 const maxuint64 = ^uint64(0)
 
