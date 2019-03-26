@@ -209,7 +209,8 @@ func a2(ctx context.Context, t, now uint64, hint Epoch, read ReadFunc) (interfac
 
 	lookAhead := func() {
 		fmt.Printf("Call ID#%d. lookahead(t=%d, Hint=%s)\n", id, t, epoch.String())
-		valueA, _ := a2(ctxA, t, now, epoch, read)
+		valueA, _ = a2(ctxA, t, now, epoch, read)
+		fmt.Printf("Call ID#%d. lookahead returned %v\n", id, valueA)
 		if valueA != nil {
 			cancelB()
 			cancelR()
