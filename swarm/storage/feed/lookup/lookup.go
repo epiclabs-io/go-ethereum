@@ -22,8 +22,6 @@ package lookup
 
 import (
 	"context"
-	"fmt"
-	"sync/atomic"
 	"time"
 )
 
@@ -48,7 +46,7 @@ type Algorithm func(ctx context.Context, now uint64, hint Epoch, read ReadFunc) 
 // read() will be called on each lookup attempt
 // Returns an error only if read() returns an error
 // Returns nil if an update was not found
-var Lookup Algorithm = A2
+var Lookup Algorithm = LongEarthAlgorithm
 
 // ReadFunc is a handler called by Lookup each time it attempts to find a value
 // It should return <nil> if a value is not found
@@ -188,115 +186,127 @@ func FluzCapacitorAlgorithm(ctx context.Context, now uint64, hint Epoch, read Re
 
 }
 
-func A2(ctx context.Context, now uint64, hint Epoch, read ReadFunc) (interface{}, error) {
+type StepFunc func(ctx context.Context, t uint64, hint Epoch) interface{}
 
-	return a2(ctx, now, now, hint, read)
-}
+func LongEarthAlgorithm(ctx context.Context, now uint64, hint Epoch, read ReadFunc) (interface{}, error) {
 
-var callId int32
+	errc := make(chan error)
+	var step StepFunc
+	step = func(stepCtx context.Context, t uint64, hint Epoch) interface{} {
+		epoch := GetNextEpoch(hint, t)
 
-func a2(ctx context.Context, t, now uint64, hint Epoch, read ReadFunc) (interface{}, error) {
-	id := atomic.AddInt32(&callId, 1)
-	epoch := GetNextEpoch(hint, t)
+		var valueA, valueB, valueR interface{}
 
-	fmt.Printf("Call ID#%d. t=%d, Epoch=%s, Hint=%s\n", id, t, epoch.String(), hint.String())
+		ctxR, cancelR := context.WithCancel(stepCtx)
+		ctxA, cancelA := context.WithCancel(stepCtx)
+		ctxB, cancelB := context.WithCancel(stepCtx)
 
-	var valueA, valueB, valueR interface{}
-
-	ctxR, cancelR := context.WithCancel(ctx)
-	ctxA, cancelA := context.WithCancel(ctx)
-	ctxB, cancelB := context.WithCancel(ctx)
-
-	lookAhead := func() {
-		fmt.Printf("Call ID#%d. lookahead(t=%d, Hint=%s)\n", id, t, epoch.String())
-		valueA, _ = a2(ctxA, t, now, epoch, read)
-		fmt.Printf("Call ID#%d. lookahead returned %v\n", id, valueA)
-		if valueA != nil {
-			cancelB()
-			cancelR()
-		}
-	}
-
-	lookBack := func() {
-		if epoch.Base() == hint.Base() {
-			fmt.Printf("Call ID#%d. Hint reached.\n", id)
-			// we have reached the hint itself
-			if hint == worstHint {
-				valueB = nil
-				return
+		lookAhead := func() {
+			valueA = step(ctxA, t, epoch)
+			if valueA != nil {
+				cancelB()
+				cancelR()
 			}
-			// check it out
+		}
+
+		lookBack := func() {
 			var err error
-			valueB, err = read(ctxB, hint, now)
-			if valueB != nil || err == context.Canceled {
+			if epoch.Base() == hint.Base() {
+				// we have reached the hint itself
+				if hint == worstHint {
+					valueB = nil
+					return
+				}
+				// check it out
+				valueB, err = read(ctxB, hint, now)
+				if valueB != nil || err == context.Canceled {
+					return
+				}
+				if err != nil {
+					errc <- err
+					return
+				}
+				// bad hint.
+				valueB = step(ctxB, hint.Base(), worstHint)
 				return
 			}
-			// bad hint.
-			valueB, _ = a2(ctxB, hint.Base(), now, worstHint, read)
-			return
-		}
-		base := epoch.Base()
-		if base == 0 {
-			return
-		}
-		fmt.Printf("Call ID#%d. lookback(t=%d, Hint=%s)\n", id, base-1, hint.String())
-		valueB, _ = a2(ctxB, base-1, now, hint, read)
-	}
-
-	go func() {
-		defer cancelR()
-		valueR, _ = read(ctxR, epoch, now)
-		if valueR == nil {
-			cancelA()
-		} else {
-			cancelB()
-		}
-	}()
-
-	go func() {
-		defer cancelA()
-		select {
-		case <-time.After(30000 * time.Millisecond):
-			lookAhead()
-		case <-ctxR.Done():
-			if valueR != nil {
-				lookAhead()
+			base := epoch.Base()
+			if base == 0 {
+				return
 			}
-		case <-ctxA.Done():
+			valueB = step(ctxB, base-1, hint)
 		}
-	}()
 
-	go func() {
-		defer cancelB()
-		select {
-		case <-time.After(30000 * time.Millisecond):
-			lookBack()
-		case <-ctxR.Done():
+		go func() {
+			defer cancelR()
+			var err error
+			valueR, err = read(ctxR, epoch, now)
 			if valueR == nil {
-				lookBack()
+				cancelA()
+			} else {
+				cancelB()
 			}
-		case <-ctxB.Done():
+			if err != nil && err != context.Canceled {
+				errc <- err
+			}
+		}()
+
+		go func() {
+			defer cancelA()
+			select {
+			case <-time.After(250 * time.Millisecond):
+				lookAhead()
+			case <-ctxR.Done():
+				if valueR != nil {
+					lookAhead()
+				}
+			case <-ctxA.Done():
+			}
+		}()
+
+		go func() {
+			defer cancelB()
+			select {
+			case <-time.After(250 * time.Millisecond):
+				lookBack()
+			case <-ctxR.Done():
+				if valueR == nil {
+					lookBack()
+				}
+			case <-ctxB.Done():
+			}
+		}()
+
+		if epoch.Level == LowestLevel || epoch.Equals(hint) {
+			cancelA()
 		}
+
+		<-ctxA.Done()
+		if valueA != nil {
+			return valueA
+		}
+
+		<-ctxR.Done()
+		if valueR != nil {
+			return valueR
+		}
+		<-ctxB.Done()
+		return valueB
+	}
+
+	var value interface{}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		value = step(ctx, now, hint)
+		cancel()
 	}()
 
-	if epoch.Level == LowestLevel || epoch.Equals(hint) {
-		cancelA()
+	select {
+	case <-ctx.Done():
+		return value, nil
+	case err := <-errc:
+		return nil, err
 	}
-
-	<-ctxA.Done()
-	if valueA != nil {
-		fmt.Printf("Call ID#%d Returning valueA=%v\n", id, valueA)
-		return valueA, nil
-	}
-
-	<-ctxR.Done()
-	if valueR != nil {
-		fmt.Printf("Call ID#%d Returning valueR=%v\n", id, valueR)
-		return valueR, nil
-	}
-
-	<-ctxB.Done()
-	fmt.Printf("Call ID#%d Returning valueB=%v\n", id, valueB)
-
-	return valueB, nil
 }
