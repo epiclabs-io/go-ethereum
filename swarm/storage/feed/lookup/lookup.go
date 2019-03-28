@@ -191,16 +191,17 @@ type StepFunc func(ctx context.Context, t uint64, hint Epoch) interface{}
 func LongEarthAlgorithm(ctx context.Context, now uint64, hint Epoch, read ReadFunc) (interface{}, error) {
 
 	errc := make(chan error)
+
 	var step StepFunc
-	step = func(stepCtx context.Context, t uint64, hint Epoch) interface{} {
-		epoch := GetNextEpoch(hint, t)
-
+	step = func(ctxS context.Context, t uint64, hint Epoch) interface{} {
 		var valueA, valueB, valueR interface{}
-
-		ctxR, cancelR := context.WithCancel(stepCtx)
-		ctxA, cancelA := context.WithCancel(stepCtx)
-		ctxB, cancelB := context.WithCancel(stepCtx)
-
+		
+		ctxR, cancelR := context.WithCancel(ctxS)
+		ctxA, cancelA := context.WithCancel(ctxS)
+		ctxB, cancelB := context.WithCancel(ctxS)
+		
+		epoch := GetNextEpoch(hint, t)
+		
 		lookAhead := func() {
 			valueA = step(ctxA, t, epoch)
 			if valueA != nil {
@@ -253,6 +254,11 @@ func LongEarthAlgorithm(ctx context.Context, now uint64, hint Epoch, read ReadFu
 
 		go func() {
 			defer cancelA()
+
+			if epoch.Level == LowestLevel || epoch.Equals(hint) {
+				return
+			}
+
 			select {
 			case <-time.After(250 * time.Millisecond):
 				lookAhead()
@@ -266,6 +272,7 @@ func LongEarthAlgorithm(ctx context.Context, now uint64, hint Epoch, read ReadFu
 
 		go func() {
 			defer cancelB()
+			
 			select {
 			case <-time.After(250 * time.Millisecond):
 				lookBack()
@@ -276,10 +283,6 @@ func LongEarthAlgorithm(ctx context.Context, now uint64, hint Epoch, read ReadFu
 			case <-ctxB.Done():
 			}
 		}()
-
-		if epoch.Level == LowestLevel || epoch.Equals(hint) {
-			cancelA()
-		}
 
 		<-ctxA.Done()
 		if valueA != nil {
